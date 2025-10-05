@@ -1,11 +1,13 @@
 mod colorramp;
 mod gamma;
+mod gamma_randr;
 mod location;
 mod solar;
 mod types;
 
 use clap::{Parser, ValueEnum};
 use gamma::{DummyGammaMethod, GammaMethod};
+use gamma_randr::RandrGammaMethod;
 use location::{LocationProvider, ManualLocationProvider};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use types::*;
@@ -19,6 +21,7 @@ const FADE_LENGTH: i32 = 40;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum GammaMethodChoice {
+    Randr,
     Dummy,
 }
 
@@ -31,7 +34,7 @@ struct Args {
     location: Option<String>,
 
     /// Gamma adjustment method
-    #[arg(short = 'm', long, default_value = "dummy")]
+    #[arg(short = 'm', long, default_value = "randr")]
     method: GammaMethodChoice,
 
     /// One-shot mode (set temperature and exit)
@@ -239,6 +242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     /* Set up gamma method */
     let mut gamma_method: Box<dyn GammaMethod> = match args.method {
+        GammaMethodChoice::Randr => Box::new(RandrGammaMethod::new()),
         GammaMethodChoice::Dummy => Box::new(DummyGammaMethod::new()),
     };
 
