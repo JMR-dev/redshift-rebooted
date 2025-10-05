@@ -59,8 +59,8 @@ The rewrite is in early stages. The original C codebase in `../legacy/` should b
 The Rust rewrite should maintain the modular architecture of the original:
 
 **Core modules to implement:**
-- Gamma adjustment backends (DRM, RANDR, VidMode, Quartz, Windows GDI)
-- Location providers (manual, GeoClue2, CoreLocation)
+- Gamma adjustment backends (DRM, RANDR, VidMode)
+- Location providers (manual, GeoClue2)
 - Solar position calculations
 - Color temperature to RGB conversion
 - Configuration parsing
@@ -105,20 +105,19 @@ Follow standard Rust conventions:
 
 ## Platform Support
 
-The original supports:
-- **Linux:** DRM (TTY), RANDR (X11 multi-output), VidMode (X11 legacy)
-- **macOS:** Quartz
-- **Windows:** GDI
+This rewrite targets Linux only:
+- **DRM:** Direct Rendering Manager (TTY/framebuffer)
+- **RANDR:** X11 RandR extension (multi-output support, preferred)
+- **VidMode:** X11 VidMode extension (legacy, single output)
 
-Each platform requires different system APIs for gamma manipulation. Conditional compilation via `cfg` attributes will be needed.
+Each method requires different system APIs for gamma manipulation. Conditional compilation via `cfg` attributes will be needed for feature detection.
 
 ## Configuration
 
-The original uses INI-format config files at:
-- Linux/macOS: `~/.config/redshift.conf`
-- Windows: `%USERPROFILE%\AppData\Local\redshift.conf`
+Configuration files should be in INI format at:
+- `~/.config/redshift.conf` (XDG standard location)
 
-Maintain this format for compatibility.
+Maintain this format for compatibility with the original.
 
 ## Testing Strategy
 

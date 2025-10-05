@@ -90,26 +90,23 @@ src/
 **Gamma Methods** ([gamma.rs](src/gamma.rs))
 - Trait-based design for multiple adjustment methods
 - Currently implements dummy method (prints temperature, no display changes)
-- Ready for additional methods: DRM, RandR, VidMode, Quartz, WinGDI
+- Ready for additional methods: DRM, RandR, VidMode
 
 **Location Providers** ([location.rs](src/location.rs))
 - Trait-based design for multiple location sources
 - Currently implements manual provider (user-specified lat/lon)
-- Ready for additional providers: GeoClue2, CoreLocation
+- Ready for additional provider: GeoClue2
 
 ## Next Steps
 
 To complete the rewrite, the following work remains:
 
-1. **Real Gamma Methods** - Port platform-specific gamma adjustment methods:
-   - DRM (Linux TTY)
-   - RandR (X11, preferred)
-   - VidMode (X11, legacy)
-   - Quartz (macOS)
-   - WinGDI (Windows)
-2. **Additional Location Providers** - Port automatic location detection:
-   - GeoClue2 (Linux)
-   - CoreLocation (macOS)
+1. **Real Gamma Methods** - Port Linux gamma adjustment methods:
+   - DRM (Direct Rendering Manager for TTY/framebuffer)
+   - RandR (X11 RandR extension, preferred, multi-output)
+   - VidMode (X11 VidMode extension, legacy, single output)
+2. **Additional Location Provider** - Port automatic location detection:
+   - GeoClue2 (Linux location service)
 3. **Configuration File Support** - Parse and apply INI-style config files
 4. **Signal Handling** - Respond to SIGUSR1 (toggle), SIGINT/SIGTERM (restore & exit)
 5. **Hook Scripts** - Execute user scripts on period changes
