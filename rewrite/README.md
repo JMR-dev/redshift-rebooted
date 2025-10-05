@@ -20,6 +20,12 @@ This is a Rust rewrite of Redshift, a screen color temperature adjustment tool. 
 - Solar calculations tested and working correctly
 - Color temperature output tested with dummy method
 
+**Phase 4: Continual Mode** ✅ Complete
+- Main event loop implemented with periodic updates
+- Smooth fade animations between color temperatures
+- Intelligent sleep intervals (5s normal, 100ms during fades)
+- Period change detection and verbose status updates
+
 ## Building
 
 ```bash
@@ -34,6 +40,9 @@ The basic command matches the legacy C version:
 ```bash
 # Print current color temperature for a location
 ./target/debug/redshift-rebooted -l 40.7:-74.0 -m dummy -pv
+
+# Continual mode (continuously updates temperature)
+./target/debug/redshift-rebooted -l 40.7:-74.0 -m dummy -v
 
 # One-shot mode (set temperature once and exit)
 ./target/debug/redshift-rebooted -l 12:-34 -m dummy -o
@@ -92,31 +101,31 @@ src/
 
 To complete the rewrite, the following work remains:
 
-1. **Continual Mode** - Implement the main event loop that continuously updates color temperature
-2. **Real Gamma Methods** - Port platform-specific gamma adjustment methods:
+1. **Real Gamma Methods** - Port platform-specific gamma adjustment methods:
    - DRM (Linux TTY)
    - RandR (X11, preferred)
    - VidMode (X11, legacy)
    - Quartz (macOS)
    - WinGDI (Windows)
-3. **Additional Location Providers** - Port automatic location detection:
+2. **Additional Location Providers** - Port automatic location detection:
    - GeoClue2 (Linux)
    - CoreLocation (macOS)
-4. **Configuration File Support** - Parse and apply INI-style config files
-5. **Transition Animations** - Smooth color temperature transitions
-6. **Signal Handling** - Respond to SIGUSR1 (toggle), SIGINT/SIGTERM (restore & exit)
-7. **Hook Scripts** - Execute user scripts on period changes
+3. **Configuration File Support** - Parse and apply INI-style config files
+4. **Signal Handling** - Respond to SIGUSR1 (toggle), SIGINT/SIGTERM (restore & exit)
+5. **Hook Scripts** - Execute user scripts on period changes
 
 ## Testing
 
-The basic version has been tested and verified to:
+The Rust rewrite has been tested and verified to:
 - Parse command-line arguments correctly
 - Calculate solar elevation accurately
 - Determine day/night/transition periods
 - Compute appropriate color temperatures
 - Display verbose output with solar information
+- Run continuously with smooth fade transitions
+- Update temperature based on changing solar position
 
-Example test (should show night temperature since location is in nighttime):
+Example test (print mode - shows current status and exits):
 ```bash
 $ ./target/debug/redshift-rebooted -l 12:-34 -m dummy -pv
 Location: 12.00, -34.00
@@ -127,7 +136,21 @@ Gamma: 1.00, 1.00, 1.00
 Solar elevation: -44.03°
 ```
 
-## Testing
+Example test (continual mode - runs forever with updates):
+```bash
+$ ./target/debug/redshift-rebooted -l 40:-74 -m dummy -v
+Location: 40.00, -74.00
+Period: Night
+Color temperature: 3500K
+# Smooth fade from initial 6500K to target 3500K over ~4 seconds
+Temperature: 6494
+Temperature: 6478
+...
+Temperature: 3500
+# Then continues monitoring, sleeping 5 seconds between checks
+```
+
+### Unit Tests
 
 Comprehensive test suites have been created for all non-dummy/non-placeholder code:
 
@@ -140,14 +163,19 @@ cargo test
 - **solar_tests.rs** (8 tests): Solar elevation calculations, time-based variations
 - **colorramp_tests.rs** (13 tests): Color temperature conversions, gamma/brightness adjustments
 - **location_tests.rs** (19 tests): Manual location provider functionality, option parsing
+- **continual_mode_tests.rs** (24 tests): Event loop logic, transition progress, fade animations, color interpolation
 
-**Total: 49 passing tests**
+**Total: 73 passing tests**
 
 All tests verify correct behavior against the legacy C implementation, including:
 - Solar position calculations at various latitudes/longitudes
 - Color temperature interpolation from blackbody table
 - Gamma ramp adjustments with brightness and gamma correction
 - Location provider initialization and configuration
+- Transition progress calculation from solar elevation
+- Fade animation smoothness and easing functions
+- Color setting interpolation and major difference detection
+- Complete event loop iteration logic
 
 ## Compatibility
 

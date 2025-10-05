@@ -7,8 +7,15 @@ mod types;
 use clap::{Parser, ValueEnum};
 use gamma::{DummyGammaMethod, GammaMethod};
 use location::{LocationProvider, ManualLocationProvider};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use types::*;
+
+/* Duration of sleep between screen updates (milliseconds). */
+const SLEEP_DURATION: u64 = 5000;
+const SLEEP_DURATION_SHORT: u64 = 100;
+
+/* Length of fade in numbers of short sleep durations. */
+const FADE_LENGTH: i32 = 40;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum GammaMethodChoice {
@@ -125,6 +132,75 @@ fn interpolate_color_setting(
     }
 }
 
+/* Determine how far through the transition we are based on elevation.
+   Returns a value from 0.0 (night) to 1.0 (day). */
+fn get_transition_progress_from_elevation(scheme: &TransitionScheme, elevation: f64) -> f64 {
+    if elevation < scheme.low {
+        0.0
+    } else if elevation < scheme.high {
+        (scheme.low - elevation) / (scheme.low - scheme.high)
+    } else {
+        1.0
+    }
+}
+
+/* Use transition progress to interpolate color settings.
+   Progress from 0.0 (night) to 1.0 (day). */
+fn interpolate_transition_scheme(
+    scheme: &TransitionScheme,
+    progress: f64,
+    result: &mut ColorSetting,
+) {
+    let alpha = progress.max(0.0).min(1.0);
+
+    result.temperature = ((1.0 - alpha) * (scheme.night.temperature as f64)
+        + alpha * (scheme.day.temperature as f64)) as i32;
+    result.brightness = ((1.0 - alpha) * (scheme.night.brightness as f64)
+        + alpha * (scheme.day.brightness as f64)) as f32;
+    result.gamma[0] = ((1.0 - alpha) * (scheme.night.gamma[0] as f64)
+        + alpha * (scheme.day.gamma[0] as f64)) as f32;
+    result.gamma[1] = ((1.0 - alpha) * (scheme.night.gamma[1] as f64)
+        + alpha * (scheme.day.gamma[1] as f64)) as f32;
+    result.gamma[2] = ((1.0 - alpha) * (scheme.night.gamma[2] as f64)
+        + alpha * (scheme.day.gamma[2] as f64)) as f32;
+}
+
+/* Return true if color settings have major differences.
+   Used to determine if a fade should be applied in continual mode. */
+fn color_setting_diff_is_major(first: &ColorSetting, second: &ColorSetting) -> bool {
+    (first.temperature - second.temperature).abs() > 25
+        || (first.brightness - second.brightness).abs() > 0.1
+        || (first.gamma[0] - second.gamma[0]).abs() > 0.1
+        || (first.gamma[1] - second.gamma[1]).abs() > 0.1
+        || (first.gamma[2] - second.gamma[2]).abs() > 0.1
+}
+
+/* Interpolate between two color settings using alpha (0.0 to 1.0). */
+fn interpolate_color_settings(
+    first: &ColorSetting,
+    second: &ColorSetting,
+    alpha: f64,
+    result: &mut ColorSetting,
+) {
+    let alpha = alpha.max(0.0).min(1.0);
+
+    result.temperature = ((1.0 - alpha) * (first.temperature as f64)
+        + alpha * (second.temperature as f64)) as i32;
+    result.brightness = ((1.0 - alpha) * (first.brightness as f64)
+        + alpha * (second.brightness as f64)) as f32;
+    result.gamma[0] = ((1.0 - alpha) * (first.gamma[0] as f64)
+        + alpha * (second.gamma[0] as f64)) as f32;
+    result.gamma[1] = ((1.0 - alpha) * (first.gamma[1] as f64)
+        + alpha * (second.gamma[1] as f64)) as f32;
+    result.gamma[2] = ((1.0 - alpha) * (first.gamma[2] as f64)
+        + alpha * (second.gamma[2] as f64)) as f32;
+}
+
+/* Ease fade function - cubic interpolation for smooth transitions. */
+fn ease_fade(t: f64) -> f64 {
+    t * t * (3.0 - 2.0 * t)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
@@ -210,9 +286,126 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    /* For continual mode, we would loop here updating the temperature
-       For now, we just set it once */
-    println!("Continual mode not yet implemented. Use -o for one-shot mode.");
+    /* Continual mode - continuously adjust color temperature */
+    run_continual_mode(&location, &scheme, gamma_method.as_mut(), args.verbose)?;
 
     Ok(())
+}
+
+/* Run continual mode loop.
+   This is the main loop of the continual mode which keeps track of the
+   current time and continuously updates the screen to the appropriate
+   color temperature. */
+fn run_continual_mode(
+    location: &Location,
+    scheme: &TransitionScheme,
+    gamma_method: &mut dyn GammaMethod,
+    verbose: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    /* Fade parameters */
+    let mut fade_length: i32 = 0;
+    let mut fade_time: i32 = 0;
+    let mut fade_start_interp = ColorSetting::default();
+
+    /* Save previous parameters so we can avoid printing status updates if
+       the values did not change. */
+    let mut prev_period = Period::None;
+    let mut prev_target_interp = ColorSetting::default();
+    let mut interp = ColorSetting::default();
+
+    if verbose {
+        println!("Color temperature: {}K", interp.temperature);
+        println!("Brightness: {:.2}", interp.brightness);
+    }
+
+    /* Continuously adjust color temperature */
+    loop {
+        /* Get current time */
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        /* Current angular elevation of the sun */
+        let elevation = solar::solar_elevation(now, location.lat as f64, location.lon as f64);
+
+        /* Determine period and transition progress */
+        let period = if elevation >= scheme.high {
+            Period::Daytime
+        } else if elevation <= scheme.low {
+            Period::Night
+        } else {
+            Period::Transition
+        };
+
+        let transition_prog = get_transition_progress_from_elevation(scheme, elevation);
+
+        /* Use transition progress to get target color temperature */
+        let mut target_interp = ColorSetting::default();
+        interpolate_transition_scheme(scheme, transition_prog, &mut target_interp);
+
+        /* Print period if it changed during this update,
+           or if we are in the transition period. In transition we
+           print the progress, so we always print it in that case. */
+        if verbose && (period != prev_period || period == Period::Transition) {
+            match period {
+                Period::Transition => {
+                    println!("Period: Transition ({:.1}%)", transition_prog * 100.0);
+                }
+                _ => {
+                    println!("Period: {}", period.name());
+                }
+            }
+        }
+
+        /* Start fade if the parameter differences are too big to apply instantly. */
+        if (fade_length == 0 && color_setting_diff_is_major(&interp, &target_interp))
+            || (fade_length != 0 && color_setting_diff_is_major(&target_interp, &prev_target_interp))
+        {
+            fade_length = FADE_LENGTH;
+            fade_time = 0;
+            fade_start_interp = interp;
+        }
+
+        /* Handle ongoing fade */
+        if fade_length != 0 {
+            fade_time += 1;
+            let frac = fade_time as f64 / fade_length as f64;
+            let alpha = ease_fade(frac).max(0.0).min(1.0);
+
+            interpolate_color_settings(&fade_start_interp, &target_interp, alpha, &mut interp);
+
+            if fade_time > fade_length {
+                fade_time = 0;
+                fade_length = 0;
+            }
+        } else {
+            interp = target_interp;
+        }
+
+        if verbose {
+            if prev_target_interp.temperature != target_interp.temperature {
+                println!("Color temperature: {}K", target_interp.temperature);
+            }
+            if prev_target_interp.brightness != target_interp.brightness {
+                println!("Brightness: {:.2}", target_interp.brightness);
+            }
+        }
+
+        /* Adjust temperature */
+        gamma_method.set_temperature(&interp, false)?;
+
+        /* Save period and target color setting as previous */
+        prev_period = period;
+        prev_target_interp = target_interp;
+
+        /* Sleep length depends on whether a fade is ongoing. */
+        let delay = if fade_length != 0 {
+            SLEEP_DURATION_SHORT
+        } else {
+            SLEEP_DURATION
+        };
+
+        std::thread::sleep(Duration::from_millis(delay));
+    }
 }
