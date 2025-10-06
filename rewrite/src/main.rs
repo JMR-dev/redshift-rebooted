@@ -221,11 +221,28 @@ fn determine_location(args: &Args) -> Result<(Location, Config), Box<dyn std::er
             println!("Using location from command-line: {:.4}, {:.4}", loc.lat, loc.lon);
         }
 
-        // Still load config for other settings
+        // Load config for other settings
         let mut config = Config::load().unwrap_or_default();
-        // Update config with manual location
-        config.set_location(loc, LocationSource::Manual, None);
-        config.save().ok(); // Ignore save errors
+
+        // Only ask to save if running in interactive mode (not print, not one-shot)
+        if !args.print && !args.one_shot {
+            use dialoguer::Confirm;
+            let should_save = Confirm::new()
+                .with_prompt("Save this location for future use?")
+                .default(false)
+                .interact()
+                .unwrap_or(false);
+
+            if should_save {
+                config.set_location(loc, LocationSource::Manual, None);
+                config.save().ok(); // Ignore save errors
+                if args.verbose {
+                    println!("Location saved to configuration file.");
+                }
+            } else if args.verbose {
+                println!("Location will not be saved (session only).");
+            }
+        }
 
         return Ok((loc, config));
     }
