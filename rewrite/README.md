@@ -177,3 +177,10 @@ All tests verify correct behavior against the legacy C implementation, including
 ## Compatibility
 
 This rewrite maintains compatibility with the legacy C version's command-line interface for basic operations. The output format and calculation methods are designed to match the original implementation.
+
+
+## Credits
+Original author of Redshift for C source code
+Simple Maps for the country/city data under Creative Commons 4.0 liscense
+https://creativecommons.org/licenses/by/4.0/
+https://simplemaps.com/data/world-cities
