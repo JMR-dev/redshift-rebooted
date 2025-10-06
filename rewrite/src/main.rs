@@ -1,14 +1,18 @@
+mod cities;
 mod colorramp;
+mod config;
 mod gamma;
 mod gamma_randr;
+mod interactive;
 mod location;
 mod solar;
 mod types;
 
 use clap::{Parser, ValueEnum};
+use config::{Config, LocationSource};
 use gamma::{DummyGammaMethod, GammaMethod};
 use gamma_randr::RandrGammaMethod;
-use location::{LocationProvider, ManualLocationProvider};
+use location::{GeoClue2LocationProvider, LocationProvider, ManualLocationProvider};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use types::*;
 
@@ -29,9 +33,13 @@ enum GammaMethodChoice {
 #[command(name = "redshift")]
 #[command(about = "Adjusts screen color temperature", long_about = None)]
 struct Args {
-    /// Location as LAT:LON (e.g., 40.7:-74.0)
+    /// Location as LAT:LON (e.g., 40.7:-74.0), or leave empty for automatic detection
     #[arg(short, long, value_name = "LAT:LON")]
     location: Option<String>,
+
+    /// Disable automatic location (requires manual location)
+    #[arg(long)]
+    no_auto_location: bool,
 
     /// Gamma adjustment method
     #[arg(short = 'm', long, default_value = "randr")]
@@ -204,6 +212,103 @@ fn ease_fade(t: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Determine location using priority system
+fn determine_location(args: &Args) -> Result<(Location, Config), Box<dyn std::error::Error>> {
+    // Priority 1: Command-line argument
+    if let Some(loc_str) = &args.location {
+        let loc = parse_location(loc_str)?;
+        if args.verbose {
+            println!("Using location from command-line: {:.4}, {:.4}", loc.lat, loc.lon);
+        }
+
+        // Still load config for other settings
+        let mut config = Config::load().unwrap_or_default();
+        // Update config with manual location
+        config.set_location(loc, LocationSource::Manual, None);
+        config.save().ok(); // Ignore save errors
+
+        return Ok((loc, config));
+    }
+
+    // Load or create config
+    let mut config = Config::load().unwrap_or_default();
+
+    // Priority 2: Try GeoClue2 if it's time for daily check
+    if config.should_check_geoclue() {
+        if args.verbose {
+            eprintln!("Checking for automatic location via GeoClue2...");
+        }
+
+        if let Ok(loc) = try_geoclue2(args.verbose) {
+            if args.verbose {
+                println!("Got location from GeoClue2: {:.4}, {:.4}", loc.lat, loc.lon);
+            }
+
+            config.set_location(loc, LocationSource::GeoClue2, None);
+            config.update_geoclue_check();
+            config.save().ok();
+
+            return Ok((loc, config));
+        }
+
+        // Mark that we checked, even though it failed
+        config.update_geoclue_check();
+        config.save().ok();
+    }
+
+    // Priority 3: Use saved configuration
+    if let Some(saved_loc) = config.get_location() {
+        if args.verbose {
+            let source_name = config.location.as_ref().map(|l| match l.source {
+                LocationSource::Manual => "manual entry",
+                LocationSource::Interactive => "interactive selection",
+                LocationSource::GeoClue2 => "GeoClue2",
+            }).unwrap_or("unknown");
+
+            if let Some(ref city) = config.location.as_ref().and_then(|l| l.city_name.as_ref()) {
+                println!("Using saved location for {}: {:.4}, {:.4} (from {})",
+                    city, saved_loc.lat, saved_loc.lon, source_name);
+            } else {
+                println!("Using saved location: {:.4}, {:.4} (from {})",
+                    saved_loc.lat, saved_loc.lon, source_name);
+            }
+        }
+
+        return Ok((saved_loc, config));
+    }
+
+    // Priority 4: Interactive selection
+    if args.no_auto_location {
+        eprintln!("Error: --no-auto-location requires -l LAT:LON or saved configuration");
+        std::process::exit(1);
+    }
+
+    eprintln!("\nNo location configured and automatic detection unavailable.");
+    let loc = interactive::select_location_interactive()?;
+
+    // Save for future use
+    let city_name = format!("Selected city"); // Could be improved
+    config.set_location(loc, LocationSource::Interactive, Some(city_name));
+    config.save().ok();
+
+    Ok((loc, config))
+}
+
+/// Try to get location from GeoClue2
+fn try_geoclue2(verbose: bool) -> Result<Location, String> {
+    let mut provider = GeoClue2LocationProvider::new();
+    provider.init()?;
+    provider.start()?;
+
+    // Wait for location
+    if verbose {
+        eprintln!("Waiting for location from GeoClue2...");
+    }
+    std::thread::sleep(Duration::from_secs(5));
+
+    provider.get_location()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
@@ -223,22 +328,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    /* Set up location provider */
-    let mut location_provider: Box<dyn LocationProvider> = if let Some(loc_str) = &args.location {
-        let loc = parse_location(loc_str)?;
-        Box::new(ManualLocationProvider::with_location(loc.lat, loc.lon))
-    } else {
-        eprintln!("Location must be specified with -l LAT:LON");
-        std::process::exit(1);
-    };
-
-    location_provider.init()?;
-    location_provider.start()?;
-    let location = location_provider.get_location()?;
-
-    if args.verbose {
-        println!("Location: {:.2}, {:.2}", location.lat, location.lon);
-    }
+    /* Determine location using priority system:
+       1. Command-line argument (-l LAT:LON)
+       2. Saved configuration file
+       3. GeoClue2 automatic detection (with daily retry)
+       4. Interactive selection (country/city list)
+    */
+    let (location, mut config) = determine_location(&args)?;
 
     /* Set up gamma method */
     let mut gamma_method: Box<dyn GammaMethod> = match args.method {
