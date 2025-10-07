@@ -33,6 +33,76 @@ cd rewrite
 cargo build --release
 ```
 
+## Installation
+
+### Quick Install (User Mode - Recommended)
+
+The easiest way to install redshift-rebooted is using the installation script:
+
+```bash
+cd rewrite
+./scripts/install.sh
+```
+
+This will:
+1. Build the release binary
+2. Install to `~/.local/bin/redshift-rebooted`
+3. Install systemd user service to `~/.config/systemd/user/`
+4. Provide instructions for enabling and starting the service
+
+### System-Wide Installation
+
+For system-wide installation (requires root):
+
+```bash
+cd rewrite
+sudo ./scripts/install.sh --system
+```
+
+This installs:
+- Binary to `/usr/bin/redshift-rebooted`
+- Systemd service to `/usr/lib/systemd/user/` (still runs as user service)
+
+### Starting the Service
+
+After installation, enable and start the service:
+
+```bash
+# Enable service to start automatically at login
+systemctl --user enable redshift-rebooted
+
+# Start the service now
+systemctl --user start redshift-rebooted
+
+# Check service status
+systemctl --user status redshift-rebooted
+
+# View logs
+journalctl --user -u redshift-rebooted -f
+```
+
+### Uninstallation
+
+To uninstall redshift-rebooted:
+
+```bash
+# User mode
+./scripts/uninstall.sh
+
+# System mode
+sudo ./scripts/uninstall.sh --system
+```
+
+### Configuration
+
+Before starting the service, configure your location in `~/.config/redshift/redshift.conf`. See [redshift.conf.sample](redshift.conf.sample) for an example configuration.
+
+The service will automatically:
+- Start when you log in (if enabled)
+- Restart on failure
+- Run in the background continuously
+- Adjust screen temperature based on time of day
+
 ## Usage
 
 The basic command matches the legacy C version:
@@ -97,6 +167,61 @@ src/
 - Currently implements manual provider (user-specified lat/lon)
 - Ready for additional provider: GeoClue2
 
+## Systemd Service
+
+The systemd service integration allows redshift-rebooted to run automatically in the background:
+
+### Service Features
+
+- **Automatic startup**: Starts at login when enabled
+- **Auto-restart**: Restarts automatically if it crashes (3-second delay)
+- **User service**: Runs as your user account with display access
+- **Graphical session**: Only starts after graphical session is available
+
+### Service Management
+
+```bash
+# Enable auto-start at login
+systemctl --user enable redshift-rebooted
+
+# Start immediately
+systemctl --user start redshift-rebooted
+
+# Stop the service
+systemctl --user stop redshift-rebooted
+
+# Disable auto-start
+systemctl --user disable redshift-rebooted
+
+# Restart after config changes
+systemctl --user restart redshift-rebooted
+
+# View status and recent logs
+systemctl --user status redshift-rebooted
+
+# Follow logs in real-time
+journalctl --user -u redshift-rebooted -f
+
+# View all logs
+journalctl --user -u redshift-rebooted
+```
+
+### Troubleshooting
+
+**Service fails to start:**
+- Check logs: `journalctl --user -u redshift-rebooted`
+- Verify configuration file exists: `~/.config/redshift/redshift.conf`
+- Test manually: `redshift-rebooted -v` to see errors
+
+**Screen temperature not changing:**
+- Ensure you're using the correct gamma method for your system
+- Check that location is configured correctly
+- Verify service is running: `systemctl --user status redshift-rebooted`
+
+**Service not starting at login:**
+- Enable the service: `systemctl --user enable redshift-rebooted`
+- Ensure systemd user services are enabled (should be default on most systems)
+
 ## Next Steps
 
 To complete the rewrite, the following work remains:
@@ -107,8 +232,8 @@ To complete the rewrite, the following work remains:
    - VidMode (X11 VidMode extension, legacy, single output)
 2. **Additional Location Provider** - Port automatic location detection:
    - GeoClue2 (Linux location service)
-3. **Configuration File Support** - Parse and apply INI-style config files
-4. **Signal Handling** - Respond to SIGUSR1 (toggle), SIGINT/SIGTERM (restore & exit)
+3. ~~**Configuration File Support**~~ ✅ Complete - INI-style config files supported
+4. ~~**Signal Handling**~~ ✅ Complete - SIGUSR1 (toggle), SIGINT/SIGTERM (restore & exit)
 5. **Hook Scripts** - Execute user scripts on period changes
 
 ## Testing
