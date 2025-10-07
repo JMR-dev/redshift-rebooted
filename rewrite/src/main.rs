@@ -2,15 +2,18 @@ mod cities;
 mod colorramp;
 mod config;
 mod gamma;
+mod gamma_guard;
 mod gamma_randr;
 mod interactive;
 mod location;
+mod signals;
 mod solar;
 mod types;
 
 use clap::{Parser, ValueEnum};
 use config::{Config, LocationSource};
 use gamma::{DummyGammaMethod, GammaMethod};
+use gamma_guard::GammaRestoreGuard;
 use gamma_randr::RandrGammaMethod;
 use location::{GeoClue2LocationProvider, LocationProvider, ManualLocationProvider};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -329,6 +332,9 @@ fn try_geoclue2(verbose: bool) -> Result<Location, String> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
+    /* Install signal handlers for graceful shutdown and mode toggling */
+    signals::install_handlers()?;
+
     /* Validate temperature bounds */
     if args.temp_day < MIN_TEMP || args.temp_day > MAX_TEMP {
         eprintln!(
@@ -392,19 +398,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    /* Create gamma restore guard to ensure cleanup on exit or panic */
+    let mut gamma_guard = GammaRestoreGuard::new(gamma_method.as_mut());
+
     /* Apply color temperature */
     if args.verbose {
         println!("Period: {}", period.name());
     }
 
-    gamma_method.set_temperature(&color_setting, false)?;
+    gamma_guard.get_mut().set_temperature(&color_setting, false)?;
 
     if args.one_shot {
+        /* For one-shot mode, don't restore gamma on exit */
+        gamma_guard.disable_restore();
         return Ok(());
     }
 
     /* Continual mode - continuously adjust color temperature */
-    run_continual_mode(&location, &scheme, gamma_method.as_mut(), args.verbose)?;
+    run_continual_mode(&location, &scheme, &mut gamma_guard, args.verbose)?;
 
     Ok(())
 }
@@ -412,11 +423,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /* Run continual mode loop.
    This is the main loop of the continual mode which keeps track of the
    current time and continuously updates the screen to the appropriate
-   color temperature. */
+   color temperature. Also handles signals for toggling and clean exit. */
 fn run_continual_mode(
     location: &Location,
     scheme: &TransitionScheme,
-    gamma_method: &mut dyn GammaMethod,
+    gamma_guard: &mut GammaRestoreGuard,
     verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     /* Fade parameters */
@@ -430,6 +441,11 @@ fn run_continual_mode(
     let mut prev_target_interp = ColorSetting::default();
     let mut interp = ColorSetting::default();
 
+    /* State for signal handling */
+    let mut disabled = false;
+    let mut prev_disabled = true; /* Start as true to trigger initial status print */
+    let mut done = false; /* Set to true when starting shutdown fade */
+
     if verbose {
         println!("Color temperature: {}K", interp.temperature);
         println!("Brightness: {:.2}", interp.brightness);
@@ -437,43 +453,83 @@ fn run_continual_mode(
 
     /* Continuously adjust color temperature */
     loop {
-        /* Get current time */
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
-
-        /* Current angular elevation of the sun */
-        let elevation = solar::solar_elevation(now, location.lat as f64, location.lon as f64);
-
-        /* Determine period and transition progress */
-        let period = if elevation >= scheme.high {
-            Period::Daytime
-        } else if elevation <= scheme.low {
-            Period::Night
-        } else {
-            Period::Transition
-        };
-
-        let transition_prog = get_transition_progress_from_elevation(scheme, elevation);
-
-        /* Use transition progress to get target color temperature */
-        let mut target_interp = ColorSetting::default();
-        interpolate_transition_scheme(scheme, transition_prog, &mut target_interp);
-
-        /* Print period if it changed during this update,
-           or if we are in the transition period. In transition we
-           print the progress, so we always print it in that case. */
-        if verbose && (period != prev_period || period == Period::Transition) {
-            match period {
-                Period::Transition => {
-                    println!("Period: Transition ({:.1}%)", transition_prog * 100.0);
-                }
-                _ => {
-                    println!("Period: {}", period.name());
-                }
+        /* Check for toggle signal (SIGUSR1) */
+        if signals::check_toggle() && !done {
+            disabled = !disabled;
+            if verbose {
+                println!("Status: {}", if disabled { "Disabled" } else { "Enabled" });
             }
         }
+
+        /* Check for exit signal (SIGINT/SIGTERM) */
+        if signals::is_exiting() {
+            if done {
+                /* Second signal during fade - stop immediately */
+                break;
+            } else {
+                /* First signal - start shutdown fade */
+                done = true;
+                disabled = true;
+                signals::clear_exiting();
+            }
+        }
+
+        /* Print status change */
+        if verbose && disabled != prev_disabled {
+            println!("Status: {}", if disabled { "Disabled" } else { "Enabled" });
+        }
+        prev_disabled = disabled;
+
+        /* When disabled, use neutral temperature; otherwise calculate from solar position */
+        let mut target_interp = if disabled {
+            /* Neutral temperature (6500K) when disabled */
+            ColorSetting {
+                temperature: 6500,
+                brightness: 1.0,
+                gamma: [1.0, 1.0, 1.0],
+            }
+        } else {
+            /* Get current time */
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64();
+
+            /* Current angular elevation of the sun */
+            let elevation = solar::solar_elevation(now, location.lat as f64, location.lon as f64);
+
+            /* Determine period and transition progress */
+            let period = if elevation >= scheme.high {
+                Period::Daytime
+            } else if elevation <= scheme.low {
+                Period::Night
+            } else {
+                Period::Transition
+            };
+
+            let transition_prog = get_transition_progress_from_elevation(scheme, elevation);
+
+            /* Use transition progress to get target color temperature */
+            let mut temp_interp = ColorSetting::default();
+            interpolate_transition_scheme(scheme, transition_prog, &mut temp_interp);
+
+            /* Print period if it changed during this update,
+               or if we are in the transition period. In transition we
+               print the progress, so we always print it in that case. */
+            if verbose && (period != prev_period || period == Period::Transition) {
+                match period {
+                    Period::Transition => {
+                        println!("Period: Transition ({:.1}%)", transition_prog * 100.0);
+                    }
+                    _ => {
+                        println!("Period: {}", period.name());
+                    }
+                }
+            }
+            prev_period = period;
+
+            temp_interp
+        };
 
         /* Start fade if the parameter differences are too big to apply instantly. */
         if (fade_length == 0 && color_setting_diff_is_major(&interp, &target_interp))
@@ -510,11 +566,15 @@ fn run_continual_mode(
         }
 
         /* Adjust temperature */
-        gamma_method.set_temperature(&interp, false)?;
+        gamma_guard.get_mut().set_temperature(&interp, false)?;
 
-        /* Save period and target color setting as previous */
-        prev_period = period;
+        /* Save target color setting as previous */
         prev_target_interp = target_interp;
+
+        /* If shutdown was requested and fade is complete, exit */
+        if done && fade_length == 0 {
+            break;
+        }
 
         /* Sleep length depends on whether a fade is ongoing. */
         let delay = if fade_length != 0 {
@@ -525,4 +585,6 @@ fn run_continual_mode(
 
         std::thread::sleep(Duration::from_millis(delay));
     }
+
+    Ok(())
 }
