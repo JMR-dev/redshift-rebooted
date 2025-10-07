@@ -1,6 +1,7 @@
 pub mod cities;
 pub mod colorramp;
 pub mod config;
+pub mod config_ini;
 pub mod gamma;
 pub mod gamma_guard;
 pub mod gamma_randr;

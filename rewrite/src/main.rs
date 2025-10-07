@@ -1,6 +1,7 @@
 mod cities;
 mod colorramp;
 mod config;
+mod config_ini;
 mod gamma;
 mod gamma_guard;
 mod gamma_randr;
@@ -67,6 +68,34 @@ struct Args {
     /// Night temperature (default: 3500K)
     #[arg(long, default_value = "3500")]
     temp_night: i32,
+
+    /// Brightness (day:night or single value)
+    #[arg(short = 'b', long)]
+    brightness: Option<String>,
+
+    /// Gamma (R:G:B or single value)
+    #[arg(short = 'g', long)]
+    gamma: Option<String>,
+}
+
+impl Args {
+    /// Merge with INI config (CLI args take priority)
+    fn merge_with_ini(&mut self, ini_config: &config_ini::RedshiftConfig) {
+        /* Temperature settings - only use INI if CLI used defaults */
+        if self.temp_day == 6500 {
+            if let Some(temp) = ini_config.temp_day {
+                self.temp_day = temp;
+            }
+        }
+        if self.temp_night == 3500 {
+            if let Some(temp) = ini_config.temp_night {
+                self.temp_night = temp;
+            }
+        }
+
+        /* Brightness and gamma - these are new, so always use from INI if not in CLI */
+        /* These will be handled separately when building the scheme */
+    }
 }
 
 fn parse_location(loc_str: &str) -> Result<Location, String> {
@@ -215,8 +244,11 @@ fn ease_fade(t: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Determine location using priority system
-fn determine_location(args: &Args) -> Result<(Location, Config), Box<dyn std::error::Error>> {
+/// Determine location using priority system (with INI config support)
+fn determine_location_with_ini(
+    args: &Args,
+    ini_config: &config_ini::RedshiftConfig,
+) -> Result<(Location, Config), Box<dyn std::error::Error>> {
     // Priority 1: Command-line argument
     if let Some(loc_str) = &args.location {
         let loc = parse_location(loc_str)?;
@@ -253,7 +285,15 @@ fn determine_location(args: &Args) -> Result<(Location, Config), Box<dyn std::er
     // Load or create config
     let mut config = Config::load().unwrap_or_default();
 
-    // Priority 2: Try GeoClue2 if it's time for daily check
+    // Priority 2: INI config file manual location
+    if let Some(ini_loc) = ini_config.get_manual_location() {
+        if args.verbose {
+            println!("Using location from INI config: {:.4}, {:.4}", ini_loc.lat, ini_loc.lon);
+        }
+        return Ok((ini_loc, config));
+    }
+
+    // Priority 3: Try GeoClue2 if it's time for daily check
     if config.should_check_geoclue() {
         if args.verbose {
             eprintln!("Checking for automatic location via GeoClue2...");
@@ -276,7 +316,7 @@ fn determine_location(args: &Args) -> Result<(Location, Config), Box<dyn std::er
         config.save().ok();
     }
 
-    // Priority 3: Use saved configuration
+    // Priority 4: Use saved TOML configuration
     if let Some(saved_loc) = config.get_location() {
         if args.verbose {
             let source_name = config.location.as_ref().map(|l| match l.source {
@@ -297,7 +337,7 @@ fn determine_location(args: &Args) -> Result<(Location, Config), Box<dyn std::er
         return Ok((saved_loc, config));
     }
 
-    // Priority 4: Interactive selection
+    // Priority 5: Interactive selection
     if args.no_auto_location {
         eprintln!("Error: --no-auto-location requires -l LAT:LON or saved configuration");
         std::process::exit(1);
@@ -329,11 +369,109 @@ fn try_geoclue2(verbose: bool) -> Result<Location, String> {
     provider.get_location()
 }
 
+/// Build transition scheme from args and INI config
+fn build_transition_scheme(
+    args: &Args,
+    ini_config: &config_ini::RedshiftConfig,
+) -> Result<TransitionScheme, String> {
+    let mut scheme = TransitionScheme::default();
+
+    /* Set temperatures from merged args */
+    scheme.day.temperature = args.temp_day;
+    scheme.night.temperature = args.temp_night;
+
+    /* Parse and apply brightness from CLI or INI */
+    if let Some(ref brightness_str) = args.brightness {
+        let (day, night) = config_ini::parse_brightness_string(brightness_str)?;
+        scheme.day.brightness = day;
+        scheme.night.brightness = night;
+    } else {
+        if let Some(day) = ini_config.brightness_day {
+            scheme.day.brightness = day;
+        }
+        if let Some(night) = ini_config.brightness_night {
+            scheme.night.brightness = night;
+        }
+    }
+
+    /* Parse and apply gamma from CLI or INI */
+    if let Some(ref gamma_str) = args.gamma {
+        let gamma = config_ini::parse_gamma_string(gamma_str)?;
+        scheme.day.gamma = gamma;
+        scheme.night.gamma = gamma;
+    } else {
+        if let Some(gamma) = ini_config.gamma_day {
+            scheme.day.gamma = gamma;
+        }
+        if let Some(gamma) = ini_config.gamma_night {
+            scheme.night.gamma = gamma;
+        }
+    }
+
+    /* Apply elevation settings from INI */
+    if let Some(high) = ini_config.elevation_high {
+        scheme.high = high;
+    }
+    if let Some(low) = ini_config.elevation_low {
+        scheme.low = low;
+    }
+
+    /* Apply time-based transition if specified */
+    if let Some(dawn) = ini_config.dawn_time {
+        scheme.use_time = true;
+        scheme.dawn = dawn;
+    }
+    if let Some(dusk) = ini_config.dusk_time {
+        scheme.use_time = true;
+        scheme.dusk = dusk;
+    }
+
+    /* Validate brightness bounds */
+    if scheme.day.brightness < MIN_BRIGHTNESS || scheme.day.brightness > MAX_BRIGHTNESS {
+        return Err(format!(
+            "Day brightness must be between {} and {}",
+            MIN_BRIGHTNESS, MAX_BRIGHTNESS
+        ));
+    }
+    if scheme.night.brightness < MIN_BRIGHTNESS || scheme.night.brightness > MAX_BRIGHTNESS {
+        return Err(format!(
+            "Night brightness must be between {} and {}",
+            MIN_BRIGHTNESS, MAX_BRIGHTNESS
+        ));
+    }
+
+    /* Validate gamma bounds */
+    for &gamma in &scheme.day.gamma {
+        if gamma < MIN_GAMMA || gamma > MAX_GAMMA {
+            return Err(format!(
+                "Day gamma must be between {} and {}",
+                MIN_GAMMA, MAX_GAMMA
+            ));
+        }
+    }
+    for &gamma in &scheme.night.gamma {
+        if gamma < MIN_GAMMA || gamma > MAX_GAMMA {
+            return Err(format!(
+                "Night gamma must be between {} and {}",
+                MIN_GAMMA, MAX_GAMMA
+            ));
+        }
+    }
+
+    Ok(scheme)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     /* Install signal handlers for graceful shutdown and mode toggling */
     signals::install_handlers()?;
+
+    /* Load INI configuration file */
+    let ini_config = config_ini::RedshiftConfig::load().unwrap_or_default();
+
+    /* Merge INI config with CLI args (CLI takes priority) */
+    args.merge_with_ini(&ini_config);
 
     /* Validate temperature bounds */
     if args.temp_day < MIN_TEMP || args.temp_day > MAX_TEMP {
@@ -353,11 +491,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     /* Determine location using priority system:
        1. Command-line argument (-l LAT:LON)
-       2. Saved configuration file
-       3. GeoClue2 automatic detection (with daily retry)
-       4. Interactive selection (country/city list)
+       2. INI config file manual location
+       3. Saved TOML configuration file
+       4. GeoClue2 automatic detection (with daily retry)
+       5. Interactive selection (country/city list)
     */
-    let (location, mut config) = determine_location(&args)?;
+    let (location, mut config) = determine_location_with_ini(&args, &ini_config)?;
 
     /* Set up gamma method */
     let mut gamma_method: Box<dyn GammaMethod> = match args.method {
@@ -368,10 +507,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     gamma_method.init()?;
     gamma_method.start()?;
 
-    /* Create transition scheme */
-    let mut scheme = TransitionScheme::default();
-    scheme.day.temperature = args.temp_day;
-    scheme.night.temperature = args.temp_night;
+    /* Create transition scheme from args and INI config */
+    let scheme = build_transition_scheme(&args, &ini_config)?;
 
     /* Get current period and color setting */
     let (period, color_setting) = get_current_period(&location, &scheme);
