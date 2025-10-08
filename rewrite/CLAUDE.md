@@ -135,3 +135,4 @@ The original includes a dummy adjustment method for testing without actual displ
 - Unit tests for color temperature conversion
 - Integration tests with dummy/mock adjustment methods
 - Always generate a coverage report at the end of a task and write tests for any uncovered lines or branches that were not previously ignored or skipped.
+- Always add logging using the internal logging function where appropriate.

@@ -11,12 +11,13 @@ mod signals;
 mod solar;
 mod types;
 
-use clap::{Parser, ValueEnum};
+use clap::{ArgAction, Parser, ValueEnum};
 use config::{Config, LocationSource};
-use gamma::{DummyGammaMethod, GammaMethod};
+use gamma::GammaMethod;
 use gamma_guard::GammaRestoreGuard;
 use gamma_randr::RandrGammaMethod;
-use location::{GeoClue2LocationProvider, LocationProvider, ManualLocationProvider};
+use location::{GeoClue2LocationProvider, LocationProvider};
+use log::{debug, info, trace};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use types::*;
 
@@ -30,7 +31,6 @@ const FADE_LENGTH: i32 = 40;
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum GammaMethodChoice {
     Randr,
-    Dummy,
 }
 
 #[derive(Parser, Debug)]
@@ -57,9 +57,9 @@ struct Args {
     #[arg(short = 'p', long)]
     print: bool,
 
-    /// Verbose output
-    #[arg(short, long)]
-    verbose: bool,
+    /// Verbose output (can be repeated: -v=info, -vv=debug, -vvv=trace)
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
 
     /// Day temperature (default: 6500K)
     #[arg(short = 't', long, default_value = "6500")]
@@ -249,12 +249,12 @@ fn determine_location_with_ini(
     args: &Args,
     ini_config: &config_ini::RedshiftConfig,
 ) -> Result<(Location, Config), Box<dyn std::error::Error>> {
+    debug!("Determining location using priority system");
+
     // Priority 1: Command-line argument
     if let Some(loc_str) = &args.location {
         let loc = parse_location(loc_str)?;
-        if args.verbose {
-            println!("Using location from command-line: {:.4}, {:.4}", loc.lat, loc.lon);
-        }
+        info!("Using location from command-line: {:.4}, {:.4}", loc.lat, loc.lon);
 
         // Load config for other settings
         let mut config = Config::load().unwrap_or_default();
@@ -271,11 +271,9 @@ fn determine_location_with_ini(
             if should_save {
                 config.set_location(loc, LocationSource::Manual, None);
                 config.save().ok(); // Ignore save errors
-                if args.verbose {
-                    println!("Location saved to configuration file.");
-                }
-            } else if args.verbose {
-                println!("Location will not be saved (session only).");
+                info!("Location saved to configuration file");
+            } else {
+                debug!("Location will not be saved (session only)");
             }
         }
 
@@ -287,22 +285,16 @@ fn determine_location_with_ini(
 
     // Priority 2: INI config file manual location
     if let Some(ini_loc) = ini_config.get_manual_location() {
-        if args.verbose {
-            println!("Using location from INI config: {:.4}, {:.4}", ini_loc.lat, ini_loc.lon);
-        }
+        info!("Using location from INI config: {:.4}, {:.4}", ini_loc.lat, ini_loc.lon);
         return Ok((ini_loc, config));
     }
 
     // Priority 3: Try GeoClue2 if it's time for daily check
     if config.should_check_geoclue() {
-        if args.verbose {
-            eprintln!("Checking for automatic location via GeoClue2...");
-        }
+        info!("Checking for automatic location via GeoClue2...");
 
-        if let Ok(loc) = try_geoclue2(args.verbose) {
-            if args.verbose {
-                println!("Got location from GeoClue2: {:.4}, {:.4}", loc.lat, loc.lon);
-            }
+        if let Ok(loc) = try_geoclue2() {
+            info!("Got location from GeoClue2: {:.4}, {:.4}", loc.lat, loc.lon);
 
             config.set_location(loc, LocationSource::GeoClue2, None);
             config.update_geoclue_check();
@@ -318,20 +310,18 @@ fn determine_location_with_ini(
 
     // Priority 4: Use saved TOML configuration
     if let Some(saved_loc) = config.get_location() {
-        if args.verbose {
-            let source_name = config.location.as_ref().map(|l| match l.source {
-                LocationSource::Manual => "manual entry",
-                LocationSource::Interactive => "interactive selection",
-                LocationSource::GeoClue2 => "GeoClue2",
-            }).unwrap_or("unknown");
+        let source_name = config.location.as_ref().map(|l| match l.source {
+            LocationSource::Manual => "manual entry",
+            LocationSource::Interactive => "interactive selection",
+            LocationSource::GeoClue2 => "GeoClue2",
+        }).unwrap_or("unknown");
 
-            if let Some(ref city) = config.location.as_ref().and_then(|l| l.city_name.as_ref()) {
-                println!("Using saved location for {}: {:.4}, {:.4} (from {})",
-                    city, saved_loc.lat, saved_loc.lon, source_name);
-            } else {
-                println!("Using saved location: {:.4}, {:.4} (from {})",
-                    saved_loc.lat, saved_loc.lon, source_name);
-            }
+        if let Some(ref city) = config.location.as_ref().and_then(|l| l.city_name.as_ref()) {
+            info!("Using saved location for {}: {:.4}, {:.4} (from {})",
+                city, saved_loc.lat, saved_loc.lon, source_name);
+        } else {
+            info!("Using saved location: {:.4}, {:.4} (from {})",
+                saved_loc.lat, saved_loc.lon, source_name);
         }
 
         return Ok((saved_loc, config));
@@ -355,15 +345,13 @@ fn determine_location_with_ini(
 }
 
 /// Try to get location from GeoClue2
-fn try_geoclue2(verbose: bool) -> Result<Location, String> {
+fn try_geoclue2() -> Result<Location, String> {
     let mut provider = GeoClue2LocationProvider::new();
     provider.init()?;
     provider.start()?;
 
     // Wait for location
-    if verbose {
-        eprintln!("Waiting for location from GeoClue2...");
-    }
+    debug!("Waiting for location from GeoClue2...");
     std::thread::sleep(Duration::from_secs(5));
 
     provider.get_location()
@@ -464,6 +452,25 @@ fn build_transition_scheme(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = Args::parse();
 
+    /* Initialize logger based on verbosity level */
+    let log_level = match args.verbose {
+        0 => log::LevelFilter::Warn,
+        1 => log::LevelFilter::Info,
+        2 => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Trace,
+    };
+
+    env_logger::Builder::from_default_env()
+        .filter_level(log_level)
+        .format_timestamp(if args.verbose >= 2 {
+            Some(env_logger::fmt::TimestampPrecision::Millis)
+        } else {
+            Some(env_logger::fmt::TimestampPrecision::Seconds)
+        })
+        .init();
+
+    debug!("Logger initialized at level: {:?}", log_level);
+
     /* Install signal handlers for graceful shutdown and mode toggling */
     signals::install_handlers()?;
 
@@ -501,9 +508,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     /* Set up gamma method */
     let mut gamma_method: Box<dyn GammaMethod> = match args.method {
         GammaMethodChoice::Randr => Box::new(RandrGammaMethod::new()),
-        GammaMethodChoice::Dummy => Box::new(DummyGammaMethod::new()),
     };
 
+    info!("Initializing gamma method: {}", gamma_method.name());
     gamma_method.init()?;
     gamma_method.start()?;
 
@@ -539,9 +546,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut gamma_guard = GammaRestoreGuard::new(gamma_method.as_mut());
 
     /* Apply color temperature */
-    if args.verbose {
-        println!("Period: {}", period.name());
-    }
+    info!("Period: {}", period.name());
+    debug!(
+        "Color temperature: {}K, Brightness: {:.2}, Gamma: {:.2}/{:.2}/{:.2}",
+        color_setting.temperature,
+        color_setting.brightness,
+        color_setting.gamma[0],
+        color_setting.gamma[1],
+        color_setting.gamma[2]
+    );
 
     gamma_guard.get_mut().set_temperature(&color_setting, false)?;
 
@@ -552,7 +565,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     /* Continual mode - continuously adjust color temperature */
-    run_continual_mode(&location, &scheme, &mut gamma_guard, args.verbose)?;
+    run_continual_mode(&location, &scheme, &mut gamma_guard)?;
 
     Ok(())
 }
@@ -565,7 +578,6 @@ fn run_continual_mode(
     location: &Location,
     scheme: &TransitionScheme,
     gamma_guard: &mut GammaRestoreGuard,
-    verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     /* Fade parameters */
     let mut fade_length: i32 = 0;
@@ -583,28 +595,26 @@ fn run_continual_mode(
     let mut prev_disabled = true; /* Start as true to trigger initial status print */
     let mut done = false; /* Set to true when starting shutdown fade */
 
-    if verbose {
-        println!("Color temperature: {}K", interp.temperature);
-        println!("Brightness: {:.2}", interp.brightness);
-    }
+    debug!("Starting continual mode loop");
+    debug!("Initial color temperature: {}K, Brightness: {:.2}", interp.temperature, interp.brightness);
 
     /* Continuously adjust color temperature */
     loop {
         /* Check for toggle signal (SIGUSR1) */
         if signals::check_toggle() && !done {
             disabled = !disabled;
-            if verbose {
-                println!("Status: {}", if disabled { "Disabled" } else { "Enabled" });
-            }
+            info!("Status: {}", if disabled { "Disabled" } else { "Enabled" });
         }
 
         /* Check for exit signal (SIGINT/SIGTERM) */
         if signals::is_exiting() {
             if done {
                 /* Second signal during fade - stop immediately */
+                debug!("Second exit signal received, stopping immediately");
                 break;
             } else {
                 /* First signal - start shutdown fade */
+                info!("Exit signal received, starting shutdown fade");
                 done = true;
                 disabled = true;
                 signals::clear_exiting();
@@ -612,8 +622,8 @@ fn run_continual_mode(
         }
 
         /* Print status change */
-        if verbose && disabled != prev_disabled {
-            println!("Status: {}", if disabled { "Disabled" } else { "Enabled" });
+        if disabled != prev_disabled {
+            info!("Status: {}", if disabled { "Disabled" } else { "Enabled" });
         }
         prev_disabled = disabled;
 
@@ -634,6 +644,7 @@ fn run_continual_mode(
 
             /* Current angular elevation of the sun */
             let elevation = solar::solar_elevation(now, location.lat as f64, location.lon as f64);
+            trace!("Solar elevation: {:.2}°", elevation);
 
             /* Determine period and transition progress */
             let period = if elevation >= scheme.high {
@@ -653,13 +664,14 @@ fn run_continual_mode(
             /* Print period if it changed during this update,
                or if we are in the transition period. In transition we
                print the progress, so we always print it in that case. */
-            if verbose && (period != prev_period || period == Period::Transition) {
+            if period != prev_period || period == Period::Transition {
                 match period {
                     Period::Transition => {
-                        println!("Period: Transition ({:.1}%)", transition_prog * 100.0);
+                        info!("Period: Transition ({:.1}%)", transition_prog * 100.0);
+                        debug!("Transition progress: {:.3} (elevation: {:.2}°)", transition_prog, elevation);
                     }
                     _ => {
-                        println!("Period: {}", period.name());
+                        info!("Period: {}", period.name());
                     }
                 }
             }
@@ -672,6 +684,7 @@ fn run_continual_mode(
         if (fade_length == 0 && color_setting_diff_is_major(&interp, &target_interp))
             || (fade_length != 0 && color_setting_diff_is_major(&target_interp, &prev_target_interp))
         {
+            debug!("Starting fade: {} steps", FADE_LENGTH);
             fade_length = FADE_LENGTH;
             fade_time = 0;
             fade_start_interp = interp;
@@ -684,8 +697,10 @@ fn run_continual_mode(
             let alpha = ease_fade(frac).max(0.0).min(1.0);
 
             interpolate_color_settings(&fade_start_interp, &target_interp, alpha, &mut interp);
+            trace!("Fade progress: {}/{} (alpha: {:.3})", fade_time, fade_length, alpha);
 
             if fade_time > fade_length {
+                debug!("Fade complete");
                 fade_time = 0;
                 fade_length = 0;
             }
@@ -693,13 +708,11 @@ fn run_continual_mode(
             interp = target_interp;
         }
 
-        if verbose {
-            if prev_target_interp.temperature != target_interp.temperature {
-                println!("Color temperature: {}K", target_interp.temperature);
-            }
-            if prev_target_interp.brightness != target_interp.brightness {
-                println!("Brightness: {:.2}", target_interp.brightness);
-            }
+        if prev_target_interp.temperature != target_interp.temperature {
+            info!("Color temperature: {}K", target_interp.temperature);
+        }
+        if prev_target_interp.brightness != target_interp.brightness {
+            debug!("Brightness: {:.2}", target_interp.brightness);
         }
 
         /* Adjust temperature */

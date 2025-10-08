@@ -2,6 +2,7 @@
 /// Ported from legacy/src/location-*.c
 
 use crate::types::Location;
+use log::{debug, error, info, trace};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::oneshot;
@@ -138,6 +139,7 @@ impl LocationProvider for GeoClue2LocationProvider {
     }
 
     fn start(&mut self) -> Result<(), String> {
+        debug!("Starting GeoClue2 location provider");
         let location = Arc::clone(&self.location);
         let error = Arc::clone(&self.error);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -147,7 +149,7 @@ impl LocationProvider for GeoClue2LocationProvider {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
             rt.block_on(async move {
                 if let Err(e) = geoclue2_async_task(location.clone(), error.clone(), shutdown_rx).await {
-                    eprintln!("GeoClue2 error: {}", e);
+                    error!("GeoClue2 error: {}", e);
                     let mut err = error.lock().unwrap();
                     *err = Some(format!("GeoClue2 error: {}", e));
                 }
@@ -158,6 +160,7 @@ impl LocationProvider for GeoClue2LocationProvider {
         self.shutdown_tx = Some(shutdown_tx);
 
         // Wait a moment for initial location
+        debug!("Waiting for initial location from GeoClue2");
         thread::sleep(std::time::Duration::from_millis(500));
 
         Ok(())
@@ -263,13 +266,13 @@ async fn geoclue2_async_task(
 
     // Get GeoClue2 Manager
     let manager = ManagerProxy::new(&conn).await?;
-    eprintln!("Connected to GeoClue2 Manager");
+    debug!("Connected to GeoClue2 Manager");
 
     // Get client path
     let client_path = manager.get_client().await.map_err(|e| {
         format!("Failed to get GeoClue2 client: {}. Make sure location services are enabled and Redshift has permission to access location.", e)
     })?;
-    eprintln!("Got GeoClue2 client path: {:?}", client_path);
+    debug!("Got GeoClue2 client path: {:?}", client_path);
 
     // Create client proxy
     let client = ClientProxy::builder(&conn)
@@ -279,19 +282,19 @@ async fn geoclue2_async_task(
 
     // Set desktop ID
     if let Err(e) = client.set_desktop_id("redshift").await {
-        eprintln!("Warning: Could not set desktop ID: {}", e);
+        debug!("Could not set desktop ID: {}", e);
     }
 
     // Set distance threshold (50km)
     if let Err(e) = client.set_distance_threshold(50000).await {
-        eprintln!("Warning: Could not set distance threshold: {}", e);
+        debug!("Could not set distance threshold: {}", e);
     }
 
     // Subscribe to location updates
     let mut location_stream = client.receive_location_updated().await?;
 
     // Start the client
-    eprintln!("Starting GeoClue2 client...");
+    debug!("Starting GeoClue2 client...");
     if let Err(e) = client.start().await {
         let err_str = e.to_string();
         if err_str.contains("AccessDenied") || err_str.contains("org.freedesktop.DBus.Error.AccessDenied") {
@@ -300,12 +303,12 @@ async fn geoclue2_async_task(
             return Err(format!("Failed to start GeoClue2 client: {}", err_str).into());
         }
     }
-    eprintln!("GeoClue2 client started, waiting for location updates...");
+    debug!("GeoClue2 client started, waiting for location updates...");
 
     // Try to get initial location from Location property
     if let Ok(loc_path) = client.location().await {
         if loc_path.as_str() != "/" {
-            eprintln!("Got initial location path: {:?}", loc_path);
+            debug!("Got initial location path: {:?}", loc_path);
             let geo_location_result = GeoLocationProxy::builder(&conn)
                 .path(&loc_path)
                 .unwrap()
@@ -319,7 +322,7 @@ async fn geoclue2_async_task(
                         lat: lat as f32,
                         lon: lon as f32,
                     });
-                    eprintln!("Initial location: {:.2}, {:.2}", lat, lon);
+                    info!("Initial location from GeoClue2: {:.2}, {:.2}", lat, lon);
                 }
             }
         }
@@ -348,10 +351,12 @@ async fn geoclue2_async_task(
                     lon: lon as f32,
                 });
 
-                eprintln!("Location updated: {:.2}, {:.2}", lat, lon);
+                info!("Location updated from GeoClue2: {:.2}, {:.2}", lat, lon);
+                trace!("New location path: {:?}", new_location_path);
             }
             _ = &mut shutdown_rx => {
                 // Shutdown requested
+                debug!("GeoClue2 shutdown requested");
                 let _ = client.stop().await;
                 return Ok(());
             }
