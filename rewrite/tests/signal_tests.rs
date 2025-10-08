@@ -95,12 +95,13 @@ fn test_sigusr1_toggle() {
     }
 
     /* Wait for clean shutdown and get output */
-    let (stdout, _stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let (stdout, stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let combined = format!("{}{}", stdout, stderr);
 
-    /* Verify toggle happened */
-    assert!(stdout.contains("Status: Enabled"), "Should show initial enabled status");
-    assert!(stdout.contains("Status: Disabled"), "Should show disabled status after SIGUSR1");
-    assert!(stdout.contains("Color temperature: 6500K"), "Should restore to 6500K when disabled");
+    /* Verify toggle happened - Status messages now go to stderr as INFO logs */
+    assert!(combined.contains("Status: Enabled"), "Should show initial enabled status");
+    assert!(combined.contains("Status: Disabled"), "Should show disabled status after SIGUSR1");
+    assert!(combined.contains("Color temperature: 6500K"), "Should restore to 6500K when disabled");
 
     /* Verify clean exit */
     let status = child.wait().expect("Failed to wait for child");
@@ -133,14 +134,15 @@ fn test_sigusr1_double_toggle() {
         libc::kill(pid as i32, libc::SIGTERM);
     }
 
-    let (stdout, _stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let (stdout, stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let combined = format!("{}{}", stdout, stderr);
 
     /* Count status changes - should have at least disabled and re-enabled */
-    let disabled_count = stdout.matches("Status: Disabled").count();
-    let enabled_count = stdout.matches("Status: Enabled").count();
+    let disabled_count = combined.matches("Status: Disabled").count();
+    let enabled_count = combined.matches("Status: Enabled").count();
 
-    assert!(disabled_count >= 1, "Should show disabled status at least once, got:\n{}", stdout);
-    assert!(enabled_count >= 1, "Should show enabled status at least once (may be initial or re-enable), got:\n{}", stdout);
+    assert!(disabled_count >= 1, "Should show disabled status at least once, got:\n{}", combined);
+    assert!(enabled_count >= 1, "Should show enabled status at least once (may be initial or re-enable), got:\n{}", combined);
 }
 
 #[test]
@@ -158,11 +160,12 @@ fn test_sigterm_clean_shutdown() {
     }
 
     /* Wait for shutdown */
-    let (stdout, _stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let (stdout, stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let combined = format!("{}{}", stdout, stderr);
 
     /* Verify gamma restoration during shutdown */
-    assert!(stdout.contains("Status: Disabled"), "Should enter disabled state on SIGTERM");
-    assert!(stdout.contains("Color temperature: 6500K"), "Should restore to neutral 6500K");
+    assert!(combined.contains("Status: Disabled"), "Should enter disabled state on SIGTERM");
+    assert!(combined.contains("Color temperature: 6500K"), "Should restore to neutral 6500K");
 
     /* Verify clean exit */
     let status = child.wait().expect("Failed to wait for child");
@@ -184,11 +187,12 @@ fn test_sigint_clean_shutdown() {
     }
 
     /* Wait for shutdown */
-    let (stdout, _stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let (stdout, stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let combined = format!("{}{}", stdout, stderr);
 
     /* Verify gamma restoration */
-    assert!(stdout.contains("Status: Disabled"), "Should enter disabled state on SIGINT");
-    assert!(stdout.contains("Color temperature: 6500K"), "Should restore to neutral 6500K");
+    assert!(combined.contains("Status: Disabled"), "Should enter disabled state on SIGINT");
+    assert!(combined.contains("Color temperature: 6500K"), "Should restore to neutral 6500K");
 
     /* Verify clean exit */
     let status = child.wait().expect("Failed to wait for child");
@@ -249,10 +253,11 @@ fn test_sigusr1_during_shutdown_ignored() {
     }
 
     /* Wait for shutdown */
-    let (stdout, _stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let (stdout, stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let combined = format!("{}{}", stdout, stderr);
 
     /* Should not toggle back to enabled during shutdown */
-    let lines: Vec<&str> = stdout.lines().collect();
+    let lines: Vec<&str> = combined.lines().collect();
     let mut found_shutdown_disabled = false;
     let mut found_enabled_after_shutdown = false;
 
@@ -318,19 +323,27 @@ fn test_gamma_restoration_fade() {
         libc::kill(pid as i32, libc::SIGTERM);
     }
 
-    let (stdout, _stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let (stdout, stderr) = read_output_with_timeout(&mut child, Duration::from_secs(5));
+    let combined = format!("{}{}", stdout, stderr);
 
     /* Should see fade from night temp (3500K) to neutral (6500K) */
-    let temperatures: Vec<i32> = stdout
+    let temperatures: Vec<i32> = combined
         .lines()
-        .filter(|line| line.starts_with("Temperature: "))
-        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter(|line| line.starts_with("Temperature: ") || line.contains("Color temperature:"))
+        .filter_map(|line| {
+            // Match both "Temperature: NNN" from dummy method and "Color temperature: NNNK" from logs
+            if line.starts_with("Temperature: ") {
+                line.split_whitespace().nth(1)
+            } else {
+                line.split("Color temperature: ").nth(1).and_then(|s| s.split('K').next())
+            }
+        })
         .filter_map(|temp| temp.parse::<i32>().ok())
         .collect();
 
     /* Should have multiple temperature values - at least a few during fade */
     assert!(temperatures.len() > 0,
-        "Should have at least some temperature readings during fade, got output:\n{}", stdout);
+        "Should have at least some temperature readings during fade, got output:\n{}", combined);
 
     /* If we got temperatures, last one should be close to 6500 */
     if let Some(&last_temp) = temperatures.last() {
