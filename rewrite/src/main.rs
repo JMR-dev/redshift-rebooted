@@ -13,7 +13,7 @@ mod types;
 
 use clap::{ArgAction, Parser, ValueEnum};
 use config::{Config, LocationSource};
-use gamma::GammaMethod;
+use gamma::{DummyGammaMethod, GammaMethod};
 use gamma_guard::GammaRestoreGuard;
 use gamma_randr::RandrGammaMethod;
 use location::{GeoClue2LocationProvider, LocationProvider};
@@ -31,6 +31,7 @@ const FADE_LENGTH: i32 = 40;
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum GammaMethodChoice {
     Randr,
+    Dummy,
 }
 
 #[derive(Parser, Debug)]
@@ -508,6 +509,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     /* Set up gamma method */
     let mut gamma_method: Box<dyn GammaMethod> = match args.method {
         GammaMethodChoice::Randr => Box::new(RandrGammaMethod::new()),
+        GammaMethodChoice::Dummy => Box::new(DummyGammaMethod::new()),
     };
 
     info!("Initializing gamma method: {}", gamma_method.name());
