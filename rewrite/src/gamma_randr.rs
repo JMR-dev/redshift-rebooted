@@ -4,6 +4,7 @@
 use crate::colorramp::colorramp_fill;
 use crate::gamma::GammaMethod;
 use crate::types::ColorSetting;
+use log::{debug, info, trace, warn};
 use std::fmt;
 use x11rb::connection::Connection;
 use x11rb::protocol::randr;
@@ -72,6 +73,13 @@ impl RandrGammaMethod {
         let conn = self.conn.as_ref().ok_or("Not connected to X server")?;
         let ramp_size = crtc_state.ramp_size as usize;
 
+        trace!(
+            "Setting temperature for CRTC: temp={}K, brightness={:.2}, gamma=[{:.2}, {:.2}, {:.2}], preserve={}",
+            setting.temperature, setting.brightness,
+            setting.gamma[0], setting.gamma[1], setting.gamma[2],
+            preserve
+        );
+
         /* Create new gamma ramps */
         let mut gamma_r = vec![0u16; ramp_size];
         let mut gamma_g = vec![0u16; ramp_size];
@@ -79,11 +87,13 @@ impl RandrGammaMethod {
 
         if preserve {
             /* Initialize from saved state */
+            debug!("Preserving original gamma ramps");
             gamma_r.copy_from_slice(&crtc_state.saved_ramps[0..ramp_size]);
             gamma_g.copy_from_slice(&crtc_state.saved_ramps[ramp_size..2 * ramp_size]);
             gamma_b.copy_from_slice(&crtc_state.saved_ramps[2 * ramp_size..3 * ramp_size]);
         } else {
             /* Initialize to linear (pure state) */
+            trace!("Starting with linear gamma ramps");
             for i in 0..ramp_size {
                 let value = ((i as f64 / ramp_size as f64) * 65536.0) as u16;
                 gamma_r[i] = value;
@@ -94,6 +104,14 @@ impl RandrGammaMethod {
 
         /* Apply color temperature adjustment */
         colorramp_fill(&mut gamma_r, &mut gamma_g, &mut gamma_b, setting);
+
+        trace!("Gamma ramp sample (first 5 values): R=[{}, {}, {}, {}, {}]",
+            gamma_r.get(0).unwrap_or(&0),
+            gamma_r.get(1).unwrap_or(&0),
+            gamma_r.get(2).unwrap_or(&0),
+            gamma_r.get(3).unwrap_or(&0),
+            gamma_r.get(4).unwrap_or(&0),
+        );
 
         /* Set gamma ramps */
         randr::set_crtc_gamma(
@@ -119,11 +137,14 @@ impl Default for RandrGammaMethod {
 
 impl GammaMethod for RandrGammaMethod {
     fn init(&mut self) -> Result<(), String> {
+        debug!("Initializing RandR gamma method");
+
         /* Open X server connection */
         let (conn, preferred_screen) = RustConnection::connect(None)
             .map_err(|e| format!("Failed to connect to X server: {}", e))?;
 
         self.preferred_screen = preferred_screen;
+        info!("Connected to X server (screen {})", preferred_screen);
 
         /* Query RandR version */
         let ver_reply = randr::query_version(&conn, RANDR_VERSION_MAJOR, RANDR_VERSION_MINOR)
@@ -140,6 +161,8 @@ impl GammaMethod for RandrGammaMethod {
             ));
         }
 
+        debug!("RandR version: {}.{}", ver_reply.major_version, ver_reply.minor_version);
+
         self.conn = Some(conn);
         Ok(())
     }
@@ -148,6 +171,8 @@ impl GammaMethod for RandrGammaMethod {
         let conn = self.conn.as_ref().ok_or("Not initialized")?;
         let root = self.get_screen_root()?;
 
+        debug!("Getting screen resources");
+
         /* Get screen resources (list of CRTCs) */
         let res_reply = randr::get_screen_resources_current(conn, root)
             .map_err(|e| format!("Failed to get screen resources: {}", e))?
@@ -155,11 +180,12 @@ impl GammaMethod for RandrGammaMethod {
             .map_err(|e| format!("RANDR Get Screen Resources Current returned error: {}", e))?;
 
         let crtcs = res_reply.crtcs;
+        info!("Found {} CRTCs", crtcs.len());
 
         /* Save CRTC state and gamma ramps */
-        for crtc in crtcs {
+        for (idx, crtc) in crtcs.iter().enumerate() {
             /* Get gamma ramp size */
-            let gamma_size_reply = randr::get_crtc_gamma_size(conn, crtc)
+            let gamma_size_reply = randr::get_crtc_gamma_size(conn, *crtc)
                 .map_err(|e| format!("Failed to get CRTC gamma size: {}", e))?
                 .reply()
                 .map_err(|e| format!("RANDR Get CRTC Gamma Size returned error: {}", e))?;
@@ -167,12 +193,14 @@ impl GammaMethod for RandrGammaMethod {
             let ramp_size = gamma_size_reply.size;
 
             if ramp_size == 0 {
-                eprintln!("Warning: CRTC has gamma ramp size 0, skipping");
+                warn!("CRTC {} has gamma ramp size 0, skipping", idx);
                 continue;
             }
 
+            debug!("CRTC {}: ramp_size={}", idx, ramp_size);
+
             /* Get current gamma ramps */
-            let gamma_get_reply = randr::get_crtc_gamma(conn, crtc)
+            let gamma_get_reply = randr::get_crtc_gamma(conn, *crtc)
                 .map_err(|e| format!("Failed to get CRTC gamma: {}", e))?
                 .reply()
                 .map_err(|e| format!("RANDR Get CRTC Gamma returned error: {}", e))?;
@@ -183,8 +211,10 @@ impl GammaMethod for RandrGammaMethod {
             saved_ramps.extend_from_slice(&gamma_get_reply.green);
             saved_ramps.extend_from_slice(&gamma_get_reply.blue);
 
+            trace!("CRTC {}: saved {} gamma ramp values", idx, saved_ramps.len());
+
             self.crtcs.push(CrtcState {
-                crtc,
+                crtc: *crtc,
                 ramp_size,
                 saved_ramps,
             });
@@ -193,6 +223,8 @@ impl GammaMethod for RandrGammaMethod {
         if self.crtcs.is_empty() {
             return Err("No usable CRTCs found".to_string());
         }
+
+        info!("Successfully initialized {} CRTCs for gamma adjustment", self.crtcs.len());
 
         Ok(())
     }

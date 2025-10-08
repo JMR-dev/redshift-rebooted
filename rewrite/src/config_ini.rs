@@ -3,6 +3,7 @@
 
 use crate::types::*;
 use ini::Ini;
+use log::{debug, info, trace};
 use std::path::PathBuf;
 
 /// Configuration loaded from INI file
@@ -35,9 +36,12 @@ pub struct RedshiftConfig {
 impl RedshiftConfig {
     /// Find and load the INI config file from standard locations
     pub fn load() -> Result<Self, String> {
+        debug!("Searching for INI configuration file");
         if let Some(path) = Self::find_config_file() {
+            info!("Found INI config file: {}", path.display());
             Self::load_from_file(&path)
         } else {
+            debug!("No INI configuration file found, using defaults");
             Ok(Self::default())
         }
     }
@@ -46,7 +50,9 @@ impl RedshiftConfig {
     pub fn find_config_file() -> Option<PathBuf> {
         let paths = Self::get_config_search_paths();
 
+        trace!("Searching for INI config in {} locations", paths.len());
         for path in paths {
+            trace!("Checking: {}", path.display());
             if path.exists() {
                 return Some(path);
             }
@@ -84,6 +90,7 @@ impl RedshiftConfig {
 
     /// Load config from a specific file
     pub fn load_from_file(path: &PathBuf) -> Result<Self, String> {
+        debug!("Loading INI config from: {}", path.display());
         let ini = Ini::load_from_file(path)
             .map_err(|e| format!("Failed to load INI file: {}", e))?;
 
@@ -93,9 +100,15 @@ impl RedshiftConfig {
         if let Some(section) = ini.section(Some("redshift")) {
             if let Some(val) = section.get("temp-day") {
                 config.temp_day = val.parse().ok();
+                if let Some(temp) = config.temp_day {
+                    debug!("Loaded temp-day from INI: {}K", temp);
+                }
             }
             if let Some(val) = section.get("temp-night") {
                 config.temp_night = val.parse().ok();
+                if let Some(temp) = config.temp_night {
+                    debug!("Loaded temp-night from INI: {}K", temp);
+                }
             }
             if let Some(val) = section.get("fade") {
                 config.fade = match val {
@@ -177,18 +190,28 @@ impl RedshiftConfig {
             if let Some(val) = section.get("lon") {
                 config.manual_lon = val.parse().ok();
             }
+            if let (Some(lat), Some(lon)) = (config.manual_lat, config.manual_lon) {
+                debug!("Loaded manual location from INI: {:.4}, {:.4}", lat, lon);
+            }
         }
 
         /* Parse [randr] section for gamma method settings */
         if let Some(section) = ini.section(Some("randr")) {
             if let Some(val) = section.get("screen") {
                 config.randr_screen = val.parse().ok();
+                if let Some(screen) = config.randr_screen {
+                    debug!("Loaded RandR screen from INI: {}", screen);
+                }
             }
             if let Some(val) = section.get("crtc") {
                 config.randr_crtc = val.parse().ok();
+                if let Some(crtc) = config.randr_crtc {
+                    debug!("Loaded RandR CRTC from INI: {}", crtc);
+                }
             }
         }
 
+        trace!("INI configuration loaded successfully");
         Ok(config)
     }
 
